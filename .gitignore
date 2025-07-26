@@ -1,0 +1,15 @@
+editor.spec
+build/editor/Analysis-00.toc
+build/editor/base_library.zip
+build/editor/editor.pkg
+build/editor/EXE-00.toc
+build/editor/PKG-00.toc
+build/editor/PYZ-00.pyz
+build/editor/PYZ-00.toc
+build/editor/warn-editor.txt
+build/editor/xref-editor.html
+build/editor/localpycs/pyimod01_archive.pyc
+build/editor/localpycs/pyimod02_importers.pyc
+build/editor/localpycs/pyimod03_ctypes.pyc
+build/editor/localpycs/pyimod04_pywin32.pyc
+build/editor/localpycs/struct.pyc
