@@ -5,6 +5,7 @@ import math
 from collections import defaultdict
 import random
 import copy
+from PIL import Image, ImageDraw, ImageTk
 
 SCALE = 5
 
@@ -90,6 +91,10 @@ class MapEditor(tk.Tk):
         self.origin_label = ttk.Label(self.coord_frame, text="X: — , Y: —")
         self.origin_label.pack(anchor="w", padx=20)
 
+        # --- Количество выбранных объектов ---
+        self.selected_count_label = ttk.Label(self.coord_frame, text="Выделено объектов: 0")
+        self.selected_count_label.pack(anchor="w", padx=20, pady=(10, 0))
+
         # --- Кнопки внизу ---
         self.button_frame = ttk.Frame(self.sidebar)
         self.button_frame.pack(side="bottom", fill="x", pady=20)
@@ -145,6 +150,15 @@ class MapEditor(tk.Tk):
         self.canvas.bind("<Button-2>", self.on_pan_start)
         self.canvas.bind("<B2-Motion>", self.on_pan_move)
         self.canvas.bind("<ButtonRelease-2>", self.on_pan_end)
+
+        self.raster_bg = None
+        self.raster_bg_cache = {
+            'zoom': None,
+            'offset_x': None,
+            'offset_y': None,
+            'size': (None, None),
+            'objects_hash': None
+        }
 
         self.update_ui_controls()
         self.draw_all()
@@ -217,12 +231,154 @@ class MapEditor(tk.Tk):
         self.canvas_objects.clear()
         self.draw_grid()
 
+        w = self.canvas.winfo_width()
+        h = self.canvas.winfo_height()
+        left = (-self.offset_x) / self.zoom
+        top = (-self.offset_y) / self.zoom
+        right = left + w / self.zoom
+        bottom = top + h / self.zoom
+
+        total_objs = sum(len(self.objects[t]) for t in self.objects)
+        simple_mode = total_objs > 500
+
+        # --- РАСТРОВЫЙ СЛОЙ ФОНА ---
+        # Хэшируем только стены/двери/ивенты
+        bg_hash = hash(str([
+            [(o['pos'], o.get('width'), o.get('height'), o.get('scale'), o.get('angle'), o.get('origin')) for o in self.objects['walls']],
+            [(o['pos'], o.get('scale'), o.get('angle'), o.get('origin')) for o in self.objects['doors']],
+            [(o['pos'], o.get('width'), o.get('height'), o.get('scale'), o.get('angle'), o.get('origin')) for o in self.objects['iventAreas']]
+        ]))
+        cache = self.raster_bg_cache
+        need_redraw = (
+            cache['zoom'] != self.zoom or
+            cache['offset_x'] != self.offset_x or
+            cache['offset_y'] != self.offset_y or
+            cache['size'] != (w, h) or
+            cache['objects_hash'] != bg_hash
+        )
+        if need_redraw:
+            img = Image.new('RGBA', (w, h), (0,0,0,0))
+            draw = ImageDraw.Draw(img)
+            # Стены
+            for obj in self.objects['walls']:
+                scale = obj.get('scale', 1.0)
+                angle = obj.get('angle', 0.0)
+                origin = obj.get('origin', obj['pos'])
+                pos = obj['pos']
+                rotated_pos = self.rotate_point(pos[0], pos[1], origin[0], origin[1], angle)
+                ww = obj['width'] * scale
+                hh = obj['height'] * scale
+                # bbox
+                x0 = (rotated_pos[0] - ww/2) * self.zoom + self.offset_x
+                y0 = (rotated_pos[1] - hh/2) * self.zoom + self.offset_y
+                x1 = (rotated_pos[0] + ww/2) * self.zoom + self.offset_x
+                y1 = (rotated_pos[1] + hh/2) * self.zoom + self.offset_y
+                # Поворот только если angle!=0
+                if abs(angle) > 0.01:
+                    # Рисуем как многоугольник
+                    rad = math.radians(angle)
+                    hw, hh2 = ww/2, hh/2
+                    corners = [
+                        (-hw, -hh2), (hw, -hh2), (hw, hh2), (-hw, hh2)
+                    ]
+                    pts = []
+                    for px, py in corners:
+                        xr = rotated_pos[0] + px * math.cos(rad) - py * math.sin(rad)
+                        yr = rotated_pos[1] + px * math.sin(rad) + py * math.cos(rad)
+                        pts.append((xr * self.zoom + self.offset_x, yr * self.zoom + self.offset_y))
+                    draw.polygon(pts, fill=(180,180,180,255))
+                else:
+                    draw.rectangle([x0, y0, x1, y1], fill=(180,180,180,255))
+            # Двери
+            for obj in self.objects['doors']:
+                scale = obj.get('scale', 1.0)
+                angle = obj.get('angle', 0.0)
+                origin = obj.get('origin', obj['pos'])
+                pos = obj['pos']
+                rotated_pos = self.rotate_point(pos[0], pos[1], origin[0], origin[1], angle)
+                ww = DOOR_BASE_WIDTH * scale
+                hh = DOOR_BASE_HEIGHT * scale
+                x0 = (rotated_pos[0] - ww/2) * self.zoom + self.offset_x
+                y0 = (rotated_pos[1] - hh/2) * self.zoom + self.offset_y
+                x1 = (rotated_pos[0] + ww/2) * self.zoom + self.offset_x
+                y1 = (rotated_pos[1] + hh/2) * self.zoom + self.offset_y
+                if abs(angle) > 0.01:
+                    rad = math.radians(angle)
+                    hw, hh2 = ww/2, hh/2
+                    corners = [
+                        (-hw, -hh2), (hw, -hh2), (hw, hh2), (-hw, hh2)
+                    ]
+                    pts = []
+                    for px, py in corners:
+                        xr = rotated_pos[0] + px * math.cos(rad) - py * math.sin(rad)
+                        yr = rotated_pos[1] + px * math.sin(rad) + py * math.cos(rad)
+                        pts.append((xr * self.zoom + self.offset_x, yr * self.zoom + self.offset_y))
+                    draw.polygon(pts, fill=(170,120,70,255))
+                else:
+                    draw.rectangle([x0, y0, x1, y1], fill=(170,120,70,255))
+            # Ивенты
+            for obj in self.objects['iventAreas']:
+                scale = obj.get('scale', 1.0)
+                angle = obj.get('angle', 0.0)
+                origin = obj.get('origin', obj['pos'])
+                pos = obj['pos']
+                rotated_pos = self.rotate_point(pos[0], pos[1], origin[0], origin[1], angle)
+                ww = obj['width'] * scale
+                hh = obj['height'] * scale
+                x0 = (rotated_pos[0] - ww/2) * self.zoom + self.offset_x
+                y0 = (rotated_pos[1] - hh/2) * self.zoom + self.offset_y
+                x1 = (rotated_pos[0] + ww/2) * self.zoom + self.offset_x
+                y1 = (rotated_pos[1] + hh/2) * self.zoom + self.offset_y
+                if abs(angle) > 0.01:
+                    rad = math.radians(angle)
+                    hw, hh2 = ww/2, hh/2
+                    corners = [
+                        (-hw, -hh2), (hw, -hh2), (hw, hh2), (-hw, hh2)
+                    ]
+                    pts = []
+                    for px, py in corners:
+                        xr = rotated_pos[0] + px * math.cos(rad) - py * math.sin(rad)
+                        yr = rotated_pos[1] + px * math.sin(rad) + py * math.cos(rad)
+                        pts.append((xr * self.zoom + self.offset_x, yr * self.zoom + self.offset_y))
+                    draw.polygon(pts, fill=(255,100,100,180))
+                else:
+                    draw.rectangle([x0, y0, x1, y1], fill=(255,100,100,180))
+            self.raster_bg = ImageTk.PhotoImage(img)
+            cache['zoom'] = self.zoom
+            cache['offset_x'] = self.offset_x
+            cache['offset_y'] = self.offset_y
+            cache['size'] = (w, h)
+            cache['objects_hash'] = bg_hash
+        if self.raster_bg:
+            self.canvas.create_image(0, 0, anchor='nw', image=self.raster_bg, tags='raster_bg')
+
+        # --- Динамические объекты ---
         for obj_type in self.objects:
+            if obj_type in ('walls', 'doors', 'iventAreas'):
+                continue  # уже нарисованы на фоне
             for obj in self.objects[obj_type]:
-                # Не рисуем выделенные объекты здесь
                 if any(sel[0] is obj for sel in self.selected_objects):
                     continue
-                self.draw_object(obj, obj_type)
+                pos = obj["pos"]
+                scale = obj.get("scale", 1.0)
+                angle = obj.get("angle", 0.0)
+                origin = obj.get("origin", pos)
+                rotated_pos = self.rotate_point(pos[0], pos[1], origin[0], origin[1], angle)
+                if obj_type == "enemies":
+                    r = ENEMY_RADIUS * scale
+                    self.canvas.create_oval((rotated_pos[0]-r)*self.zoom + self.offset_x,
+                                            (rotated_pos[1]-r)*self.zoom + self.offset_y,
+                                            (rotated_pos[0]+r)*self.zoom + self.offset_x,
+                                            (rotated_pos[1]+r)*self.zoom + self.offset_y,
+                                            fill="purple", outline="")
+                elif obj_type == "playerSpawns":
+                    r = PLAYERSPAWNS_RADIUS * scale
+                    self.canvas.create_oval((rotated_pos[0]-r)*self.zoom + self.offset_x,
+                                            (rotated_pos[1]-r)*self.zoom + self.offset_y,
+                                            (rotated_pos[0]+r)*self.zoom + self.offset_x,
+                                            (rotated_pos[1]+r)*self.zoom + self.offset_y,
+                                            fill="green", outline="")
+        # ... остальной код draw_all (оси, выделение, origin) ...
 
         zero_x, zero_y = self.to_canvas_coords(0, 0)
         w = self.canvas.winfo_width()
@@ -383,7 +539,7 @@ class MapEditor(tk.Tk):
 
         self.canvas.create_polygon(points, **kwargs, joinstyle="round")
 
-    def draw_object(self, obj, obj_type):
+    def draw_object(self, obj, obj_type, simple_mode=False):
         scale = obj.get("scale", 1.0)
         angle = obj.get("angle", 0.0)
         origin = obj.get("origin", obj["pos"])
@@ -393,31 +549,52 @@ class MapEditor(tk.Tk):
         if obj_type == "walls":
             w = obj["width"] * scale
             h = obj["height"] * scale
-            self.draw_rotated_rect(rotated_pos[0], rotated_pos[1], w, h, angle, pivot="center", fill="gray")
-
+            if simple_mode:
+                self.draw_rotated_rect(rotated_pos[0], rotated_pos[1], w, h, angle, pivot="center", fill="#bbbbbb")
+            else:
+                self.draw_rotated_rect(rotated_pos[0], rotated_pos[1], w, h, angle, pivot="center", fill="gray")
         elif obj_type == "doors":
             w = DOOR_BASE_WIDTH * scale
             h = DOOR_BASE_HEIGHT * scale
-            self.draw_rotated_rect(rotated_pos[0], rotated_pos[1], w, h, angle, pivot="center", fill="brown")
-
+            if simple_mode:
+                self.draw_rotated_rect(rotated_pos[0], rotated_pos[1], w, h, angle, pivot="center", fill="#a97b50")
+            else:
+                self.draw_rotated_rect(rotated_pos[0], rotated_pos[1], w, h, angle, pivot="center", fill="brown")
         elif obj_type == "iventAreas":
             w = obj["width"] * scale
             h = obj["height"] * scale
-            self.draw_rotated_rect(rotated_pos[0], rotated_pos[1], w, h, angle, pivot="center", fill="red")
+            if simple_mode:
+                self.draw_rotated_rect(rotated_pos[0], rotated_pos[1], w, h, angle, pivot="center", fill="#ffb3b3")
+            else:
+                self.draw_rotated_rect(rotated_pos[0], rotated_pos[1], w, h, angle, pivot="center", fill="red")
         elif obj_type == "enemies":
             r = ENEMY_RADIUS * scale
-            self.canvas.create_oval((rotated_pos[0]-r)*self.zoom + self.offset_x,
-                                    (rotated_pos[1]-r)*self.zoom + self.offset_y,
-                                    (rotated_pos[0]+r)*self.zoom + self.offset_x,
-                                    (rotated_pos[1]+r)*self.zoom + self.offset_y,
-                                    fill="purple", outline="")
+            if simple_mode:
+                self.canvas.create_oval((rotated_pos[0]-r)*self.zoom + self.offset_x,
+                                        (rotated_pos[1]-r)*self.zoom + self.offset_y,
+                                        (rotated_pos[0]+r)*self.zoom + self.offset_x,
+                                        (rotated_pos[1]+r)*self.zoom + self.offset_y,
+                                        fill="#a080c0", outline="")
+            else:
+                self.canvas.create_oval((rotated_pos[0]-r)*self.zoom + self.offset_x,
+                                        (rotated_pos[1]-r)*self.zoom + self.offset_y,
+                                        (rotated_pos[0]+r)*self.zoom + self.offset_x,
+                                        (rotated_pos[1]+r)*self.zoom + self.offset_y,
+                                        fill="purple", outline="")
         elif obj_type == "playerSpawns":
             r = PLAYERSPAWNS_RADIUS * scale
-            self.canvas.create_oval((rotated_pos[0]-r)*self.zoom + self.offset_x,
-                                    (rotated_pos[1]-r)*self.zoom + self.offset_y,
-                                    (rotated_pos[0]+r)*self.zoom + self.offset_x,
-                                    (rotated_pos[1]+r)*self.zoom + self.offset_y,
-                                    fill="green", outline="")
+            if simple_mode:
+                self.canvas.create_oval((rotated_pos[0]-r)*self.zoom + self.offset_x,
+                                        (rotated_pos[1]-r)*self.zoom + self.offset_y,
+                                        (rotated_pos[0]+r)*self.zoom + self.offset_x,
+                                        (rotated_pos[1]+r)*self.zoom + self.offset_y,
+                                        fill="#7fd97f", outline="")
+            else:
+                self.canvas.create_oval((rotated_pos[0]-r)*self.zoom + self.offset_x,
+                                        (rotated_pos[1]-r)*self.zoom + self.offset_y,
+                                        (rotated_pos[0]+r)*self.zoom + self.offset_x,
+                                        (rotated_pos[1]+r)*self.zoom + self.offset_y,
+                                        fill="green", outline="")
             # no arrow for playerSpawns
 
         self.canvas_objects.append((obj, obj_type))
@@ -683,6 +860,9 @@ class MapEditor(tk.Tk):
         # self.update_params_ui()  # НЕ вызываем!
 
     def update_params_ui(self):
+        # Обновляем количество выбранных объектов
+        count = len(self.selected_objects)
+        self.selected_count_label.config(text=f"Выделено объектов: {count}")
         if not self.selected_objects:
             self.clear_params_inputs()
             return
@@ -1034,6 +1214,9 @@ class MapEditor(tk.Tk):
 
         tk.messagebox.showinfo("Сохранено", f"Файл сохранен: {filename}")
 
+        self.raster_bg = None
+        self.raster_bg_cache = {'zoom': None, 'offset_x': None, 'offset_y': None, 'size': (None, None), 'objects_hash': None}
+
     def load_json(self):
         from tkinter import filedialog
         filename = filedialog.askopenfilename(
@@ -1099,6 +1282,9 @@ class MapEditor(tk.Tk):
         self.update_params_ui()
         self.draw_all()
 
+        self.raster_bg = None
+        self.raster_bg_cache = {'zoom': None, 'offset_x': None, 'offset_y': None, 'size': (None, None), 'objects_hash': None}
+
     def on_arrow_key(self, direction, event):
         if not self.selected_objects:
             return
@@ -1120,6 +1306,8 @@ class MapEditor(tk.Tk):
         global CANVAS_WIDTH, CANVAS_HEIGHT
         CANVAS_WIDTH = event.width
         CANVAS_HEIGHT = event.height
+        self.raster_bg = None
+        self.raster_bg_cache = {'zoom': None, 'offset_x': None, 'offset_y': None, 'size': (None, None), 'objects_hash': None}
         self.draw_all()
 
     def clear_selection(self):
